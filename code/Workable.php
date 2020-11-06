@@ -104,9 +104,10 @@ class Workable implements Flushable
      * rate limiting docs https://workable.readme.io/docs/rate-limits
      * @param  array  $params Array of params, e.g. ['state' => 'published'].
      *                        see https://workable.readme.io/docs/jobs for full list of query params
+     * @param  int    $retries Number of times to try to wait out a 429 response (rate-limit)
      * @return ArrayList
      */
-    public function getFullJobs($params = [])
+    public function getFullJobs($params = [], $retries = 3)
     {
         $cacheKey = 'FullJobs' . implode($params, '-');
 
@@ -115,7 +116,7 @@ class Workable implements Flushable
         }
 
         $list = ArrayList::create();
-        $response = $this->callRestfulService('jobs', $params);
+        $response = $this->callRestfulService('jobs', $params, 'GET', $retries);
 
         if ($response && isset($response['jobs']) && is_array($response['jobs'])) {
             foreach ($response['jobs'] as $record) {
@@ -134,9 +135,10 @@ class Workable implements Flushable
      * @param  string $url
      * @param  array  $params
      * @param  string $method
+     * @param  int    $retries
      * @return array  JSON as array
      */
-    public function callRestfulService($url, $params = [], $method = 'GET')
+    public function callRestfulService($url, $params = [], $method = 'GET', $retries = 0)
     {
         try {
             $response = $this->restfulService->request($method, $url, ['query' => $params]);
@@ -146,6 +148,17 @@ class Workable implements Flushable
                 ['exception' => $e]
             );
             return [];
+        }
+
+        // If we hit the rate-limit, let's back off and try again
+        if ($retries > 0 && $response->getStatusCode() === 429) {
+            $nextIntervalTimestamp = $response->getHeader('X-Rate-Limit-Reset');
+            if (!empty($nextIntervalTimestamp)) {
+                time_sleep_until($nextIntervalTimestamp);
+            } else {
+                sleep(2**(5 - min($retries, 5)));
+            }
+            return $this->callRestfulService($url, $params, $method, --$retries);
         }
 
         return json_decode($response->getBody(), true);
